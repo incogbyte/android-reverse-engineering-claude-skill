@@ -1,4 +1,4 @@
-# Android Reverse Engineering — Claude Code Skill
+# Android Reverse Engineering - Claude Code Skill
 
 **Author:** [incogbyte](https://github.com/incogbyte)
 
