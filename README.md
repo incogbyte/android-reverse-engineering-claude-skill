@@ -300,18 +300,3 @@ android-reverse-engineering-skill/
 ├── LICENSE
 └── README.md
 ```
-
-## Disclaimer
-
-This skill is provided exclusively for **legitimate use**, including:
-
-- Authorized security research and pentesting
-- Interoperability analysis permitted by law
-- Malware analysis and incident response
-- Educational use and CTF competitions
-
-**You are solely responsible** for ensuring that your use of this tool complies with applicable laws and terms of service.
-
-## License
-
-Apache 2.0 — see [LICENSE](LICENSE)
