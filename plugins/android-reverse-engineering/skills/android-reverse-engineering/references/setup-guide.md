@@ -233,6 +233,135 @@ adb pull /data/app/com.example.app-xxxx/base.apk ./app.apk
 
 ---
 
+## Frida (Dynamic Analysis)
+
+Frida is used for runtime instrumentation — hooking methods, bypassing protections, intercepting traffic. The setup involves two parts: **frida-tools** (Python client on your machine) and **frida-server** (binary on the Android device).
+
+### Automated Setup (recommended)
+
+The `setup-frida.sh` script handles everything:
+
+```bash
+bash scripts/setup-frida.sh
+```
+
+What it does:
+1. Checks if a device is connected via adb
+2. Looks for an existing frida-server on the device (most users already have one)
+3. Gets the frida-server version from the device binary
+4. Creates a Python venv at `~/.local/share/frida-re/venv`
+5. Installs `frida-tools` matching the device's frida-server version
+6. Validates version compatibility
+7. Tests connectivity with `frida-ps -U`
+
+If no frida-server exists on the device:
+```bash
+bash scripts/setup-frida.sh --install-server
+```
+
+### Manual Setup
+
+#### 1. Python 3 + venv
+
+```bash
+# macOS
+brew install python3
+
+# Ubuntu/Debian
+sudo apt install python3 python3-venv python3-pip
+
+# Verify
+python3 --version
+python3 -m venv --help
+```
+
+#### 2. Frida Tools (always in a venv)
+
+**Never install frida-tools globally.** Always use a virtual environment:
+
+```bash
+# Create venv
+python3 -m venv ~/.local/share/frida-re/venv
+
+# Activate
+source ~/.local/share/frida-re/venv/bin/activate
+
+# Install frida-tools (match your frida-server version)
+pip install frida-tools==16.5.2  # example — use YOUR server version
+
+# Verify
+frida --version
+frida-ps -U
+```
+
+To match a specific frida-server version:
+```bash
+# Check server version on device
+adb shell /data/local/tmp/frida-server --version
+
+# Install matching client
+pip install frida-tools==<same version>
+```
+
+#### 3. Frida Server on Device
+
+```bash
+# Check device architecture
+adb shell getprop ro.product.cpu.abi
+# Output: arm64-v8a, armeabi-v7a, x86_64, or x86
+
+# Download matching frida-server from:
+# https://github.com/frida/frida/releases
+# Look for: frida-server-<version>-android-<arch>.xz
+
+# Decompress
+xz -d frida-server-*.xz
+
+# Push to device
+adb push frida-server /data/local/tmp/
+adb shell chmod 755 /data/local/tmp/frida-server
+
+# Start (requires root)
+adb shell su -c '/data/local/tmp/frida-server -D &'
+
+# Verify from host
+frida-ps -U
+```
+
+### Version Matching
+
+**Client and server versions must match** (at least the major version). Mismatched versions cause cryptic connection errors.
+
+```bash
+# Check server version
+adb shell /data/local/tmp/frida-server --version
+
+# Check client version
+~/.local/share/frida-re/venv/bin/frida --version
+
+# If they differ, reinstall the client to match:
+~/.local/share/frida-re/venv/bin/pip install frida-tools==<server-version>
+```
+
+### Using Frida via the Venv
+
+After setup, always use the venv binaries directly:
+
+```bash
+# Without activating venv
+~/.local/share/frida-re/venv/bin/frida -U <target>
+~/.local/share/frida-re/venv/bin/frida-ps -U
+~/.local/share/frida-re/venv/bin/frida-trace -U -f <package> -j 'com.example.*!*'
+
+# Or activate the venv first
+source ~/.local/share/frida-re/venv/bin/activate
+frida -U <target>
+```
+
+The `frida-run.sh` script handles this automatically — it uses the venv without requiring activation.
+
+---
+
 ## Troubleshooting
 
 | Problem | Solution |
@@ -247,3 +376,10 @@ adb pull /data/app/com.example.app-xxxx/base.apk ./app.apk
 | bundletool not found for AAB file | Install bundletool or set `BUNDLETOOL_JAR_PATH` env variable |
 | AAB fails with signing error | Use `--mode=universal` (default in decompile.sh) — no signing needed for analysis |
 | DEX file not recognized | Ensure the file has `.dex` extension; jadx handles DEX natively |
+| `frida-ps -U` shows nothing | frida-server not running — `adb shell su -c '/data/local/tmp/frida-server -D &'` |
+| `Failed to enumerate processes` | Version mismatch between frida-tools and frida-server — check both versions |
+| `unable to connect to remote frida-server` | Server not started, or device not in adb devices list |
+| `frida-tools` install fails in venv | Upgrade pip first: `venv/bin/python -m pip install --upgrade pip` |
+| `python3 -m venv` fails | Install venv module: `sudo apt install python3-venv` (Debian/Ubuntu) |
+| App crashes immediately with Frida | RASP detection — use `--pause` flag and hook before app code runs |
+| frida-server killed after a few seconds | Anti-frida process scanner — rename the binary or use a non-default port |

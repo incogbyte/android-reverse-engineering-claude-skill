@@ -1,14 +1,14 @@
 ---
-description: Decompile Android APK, XAPK, AAB, DEX, JAR, and AAR files using jadx or Fernflower/Vineflower. Reverse engineer Android apps, extract HTTP API endpoints (Retrofit, OkHttp, Volley, GraphQL, WebSocket), trace call flows from UI to network layer, and analyze security patterns (cert pinning, exposed secrets). Use when the user wants to decompile, analyze, or reverse engineer Android packages, find API endpoints, follow call flows, or audit app security.
+description: Decompile Android APK, XAPK, AAB, DEX, JAR, and AAR files using jadx or Fernflower/Vineflower. Reverse engineer Android apps, extract HTTP API endpoints (Retrofit, OkHttp, Volley, GraphQL, WebSocket), trace call flows from UI to network layer, analyze security patterns (cert pinning, exposed secrets), and perform dynamic analysis with Frida (adaptive bypass generation, crash analysis, runtime hooking). Use when the user wants to decompile, analyze, or reverse engineer Android packages, find API endpoints, follow call flows, audit app security, or bypass runtime protections.
 ---
 
 # Android Reverse Engineering
 
-Decompile Android APK, XAPK, AAB, DEX, JAR, and AAR files using jadx and Fernflower/Vineflower, trace call flows through application code and libraries, analyze security patterns, and produce structured documentation of extracted APIs. Two decompiler engines are supported — jadx for broad Android coverage and Fernflower for higher-quality output on complex Java code — and can be used together for comparison.
+Decompile Android APK, XAPK, AAB, DEX, JAR, and AAR files using jadx and Fernflower/Vineflower, trace call flows through application code and libraries, analyze security patterns, produce structured documentation of extracted APIs, and perform adaptive dynamic analysis with Frida — generating custom bypass scripts based on what the static analysis finds, iterating through crash logs to refine hooks until protections are bypassed. Two decompiler engines are supported — jadx for broad Android coverage and Fernflower for higher-quality output on complex Java code — and can be used together for comparison.
 
 ## Prerequisites
 
-This skill requires **Java JDK 17+** and **jadx** to be installed. **Fernflower/Vineflower** and **dex2jar** are optional but recommended for better decompilation quality. **bundletool** is required for AAB (App Bundle) files. Run the dependency checker to verify:
+This skill requires **Java JDK 17+** and **jadx** to be installed. **Fernflower/Vineflower** and **dex2jar** are optional but recommended for better decompilation quality. **bundletool** is required for AAB (App Bundle) files. For dynamic analysis (Phase 7), **Python 3.8+**, **adb**, and a device/emulator with **frida-server** are needed — the `setup-frida.sh` script handles the full setup. Run the dependency checker to verify:
 
 ```bash
 bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/check-deps.sh
@@ -201,7 +201,233 @@ Then, for each discovered endpoint, read the surrounding source code to extract:
 
 See `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/api-extraction-patterns.md` for library-specific search patterns and the full documentation template.
 
-### Phase 6: Security Analysis
+### Phase 7: Dynamic Analysis with Frida (Adaptive Loop)
+
+Use Frida to observe and modify app behavior at runtime. **Do not use pre-built generic bypass scripts.** Instead, generate custom Frida scripts based on what the static analysis (Phases 3–6) revealed in the decompiled code, then iterate based on crash logs and runtime behavior.
+
+This phase requires a connected device/emulator. The user likely already has frida-server on their device — detect it first before offering to install anything.
+
+#### Step 7.1: Setup Frida Environment
+
+**Action**: Run the Frida setup script. It detects the existing environment before changing anything.
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/setup-frida.sh
+```
+
+The script performs these checks in order:
+1. **adb connectivity** — is a device/emulator connected?
+2. **frida-server on device** — checks common paths (`/data/local/tmp/frida-server`, etc.) and running processes
+3. **frida-server version** — extracts version from the binary on device
+4. **Python 3 + venv module** — required for frida-tools
+5. **Creates/reuses venv** — at `~/.local/share/frida-re/venv`, installs `frida-tools` matching the device's frida-server version
+6. **Version match validation** — warns if client/server versions diverge
+7. **Connectivity test** — runs `frida-ps -U` to verify end-to-end
+
+If frida-server is missing from the device, the script prints instructions. To auto-install:
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/setup-frida.sh --install-server
+```
+
+**Important**: The venv ensures frida-tools never pollutes the global Python environment. The version matching ensures client and server are compatible. If the user already has a working frida-server, the script adapts to their version instead of forcing an upgrade.
+
+Read the machine-readable output lines (`FRIDA_VENV=`, `FRIDA_SERVER_VERSION=`, `FRIDA_DEVICE=`, `FRIDA_STATUS=`) to configure subsequent steps.
+
+#### Step 7.2: Baseline Crash Check (Before Any Hooks)
+
+Before writing any Frida script, check if the app even runs on this device. Many apps with RASP will crash immediately on rooted devices/emulators.
+
+**Action**: Launch the app and capture crash diagnostics.
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/adb-crash-capture.sh -p <package>
+```
+
+Options:
+- `-t <seconds>` — monitoring window (default: 10)
+- `-a <activity>` — launch specific activity instead of auto-detect
+- `-o <dir>` — save logcat/crash logs to directory
+- `-v` — include full logcat in output
+
+Read the machine-readable output:
+- `APP_STATUS=running` — app is fine, proceed to runtime analysis
+- `APP_STATUS=crashed` — check `CRASH_SIGNAL`, `CRASH_EXCEPTION`, `CRASH_MESSAGE`
+- `APP_STATUS=exited` — app quit without a visible crash (common RASP pattern: `System.exit()` or `Process.killProcess()`)
+
+The script also outputs:
+- **JAVA CRASH** section — full stack trace from `FATAL EXCEPTION`
+- **NATIVE CRASH** section — signal info and native backtrace
+- **RASP/SECURITY INDICATORS** — log lines mentioning security, root, frida, tamper, integrity, debug, hook
+- **APP LOG** — last 50 lines from the app's PID
+
+If the app runs fine (status=running), skip to Step 7.4 for runtime analysis.
+If the app crashes or exits, proceed to Step 7.3.
+
+#### Step 7.3: Adaptive Bypass Loop
+
+This is the core of dynamic analysis. Use the decompiled code from previous phases combined with crash logs to understand WHY the app is dying, then generate a targeted Frida script to bypass that specific check.
+
+**The loop**:
+
+```
+1. Read crash output from Step 7.2 (or previous iteration)
+2. Identify the protection mechanism:
+   - Cross-reference crash class/method with decompiled code
+   - Follow the stack trace back to the triggering check
+   - Look for the RASP/security indicators in logs
+3. Read the relevant decompiled source to understand the check logic
+4. Generate a Frida script that specifically disables that check
+5. Run the script and capture new crash output
+6. If still crashing: repeat from step 1 (new crash = new check to bypass)
+7. If running: proceed to Step 7.4
+```
+
+**How to identify protection mechanisms from crash data**:
+
+| Crash Pattern | Likely Cause | Where to Look in Decompiled Code |
+|---|---|---|
+| `System.exit(0)` in stack trace | RASP calling `System.exit()` | Search for `System.exit` and `Process.killProcess` calls |
+| `SecurityException` | Permission or integrity check | Search for the exception class in decompiled code |
+| `SIGABRT` from native code | Native anti-tamper (frida detection, lib integrity) | Check `.so` libraries loaded by the app, search for `dlopen`, `ptrace`, `frida` strings |
+| App starts then immediately closes (no crash) | `finish()` called on Activity, or `System.exit()` in `onCreate` | Read the launcher Activity's `onCreate()`, look for conditional `finish()` calls |
+| `RootBeer`, `SafetyNet`, `Play Integrity` in logs | Root/integrity detection SDK | Search for the SDK's package in decompiled code |
+| `ssl`, `certificate`, `pin` in crash | SSL pinning preventing traffic inspection | Search for `CertificatePinner`, `TrustManager`, network security config |
+| `frida`, `xposed`, `substrate` in logs | Instrumentation framework detection | Search for string constants checking process names, ports, or loaded modules |
+
+**How to generate the bypass script**:
+
+Read the decompiled source of the method that performs the check. Understand:
+- What does the method return? (boolean, int, void)
+- Is it Java or native?
+- Does it run once (in `onCreate`) or continuously (background thread)?
+- What is the expected "safe" return value?
+
+Then write a Frida script that hooks that specific method. Examples of patterns (adapt to actual code):
+
+For a Java method returning boolean:
+```javascript
+Java.perform(function() {
+    var cls = Java.use('com.example.security.RootChecker');
+    cls.isDeviceRooted.implementation = function() {
+        console.log('[bypass] RootChecker.isDeviceRooted() called, returning false');
+        return false;
+    };
+});
+```
+
+For a native function:
+```javascript
+var funcAddr = Module.findExportByName("libsecurity.so", "Java_com_example_NativeCheck_verify");
+if (funcAddr) {
+    Interceptor.replace(funcAddr, new NativeCallback(function() {
+        console.log('[bypass] native verify() called, returning 0');
+        return 0;
+    }, 'int', []));
+}
+```
+
+For `System.exit()` prevention (when you don't know the exact check yet):
+```javascript
+Java.perform(function() {
+    var System = Java.use('java.lang.System');
+    System.exit.implementation = function(code) {
+        console.log('[bypass] System.exit(' + code + ') blocked');
+        // Don't call the original — app stays alive
+        // Check the stack trace to find who's calling this:
+        console.log(Java.use("android.util.Log").getStackTraceString(
+            Java.use("java.lang.Throwable").$new()
+        ));
+    };
+});
+```
+
+**Action**: Save the generated script to a temp file and run it:
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/frida-run.sh \
+  -p <package> -l /tmp/bypass.js -t 15
+```
+
+Options:
+- `-t <seconds>` — timeout (default: 30)
+- `--pause` — suspend app on spawn, useful for early hooks before any app code runs
+- `--attach` — attach to running process instead of spawning
+- `-e "<code>"` — inline JavaScript instead of a file
+- `--output-dir <dir>` — save stdout/stderr/crash to files
+
+Read the output:
+- `FRIDA_RESULT=success` — bypass worked, app is running
+- `FRIDA_RESULT=crash` — check the CRASH LOG section, identify the next check to bypass
+- `FRIDA_RESULT=connection_failed` — frida-server issue, re-run setup-frida.sh
+- `FRIDA_RESULT=timeout` — app ran for the full timeout window (usually means success)
+
+**If the app crashes again**: read the new crash log, cross-reference with decompiled code, identify the NEXT protection check, add another hook to the script, and run again. Each iteration should bypass one more check. Common pattern: apps have 3–5 layered checks.
+
+**Important considerations**:
+- Use `--pause` (spawn gating) when the check runs in `Application.onCreate()` — this ensures hooks are in place before any app code executes
+- If the app uses a background thread for continuous checks, hook `Thread.start()` or the specific `Runnable` to neutralize it
+- If native checks use `ptrace(PTRACE_TRACEME)`, hook `ptrace` via `Interceptor.replace`
+- If the app checks for frida-server's default port (27042), the frida-server can be started on a different port: `frida-server -l 0.0.0.0:1337`
+- Log stack traces in your hooks — they reveal the call chain leading to the check, which helps find related checks
+
+#### Step 7.4: Runtime Analysis
+
+Once the app is running (with or without bypass scripts), use Frida for the actual analysis goals.
+
+**Generate analysis scripts based on what static analysis found.** Do not use generic scripts — target the specific classes, methods, and patterns identified in Phases 3–6.
+
+Common analysis patterns (adapt to the actual code found):
+
+**Intercept HTTP traffic** — hook the specific HTTP client the app uses (identified in Phase 5):
+```javascript
+// Example: if static analysis found OkHttp usage
+Java.perform(function() {
+    var OkHttpClient = Java.use('okhttp3.OkHttpClient');
+    var RealCall = Java.use('okhttp3.internal.connection.RealCall');
+    // Hook based on actual classes found in the decompiled code
+});
+```
+
+**Monitor crypto operations** — hook the specific encryption methods found in Phase 6:
+```javascript
+// Example: if static analysis found AES usage in com.example.crypto.CryptoHelper
+Java.perform(function() {
+    var helper = Java.use('com.example.crypto.CryptoHelper');
+    // Hook the specific encrypt/decrypt methods found
+});
+```
+
+**Trace method calls** — when static analysis shows a call flow but you need to verify it at runtime:
+```bash
+# Use frida-trace for quick method tracing (uses the venv)
+$FRIDA_VENV/bin/frida-trace -U -f <package> -j 'com.example.api.*!*'
+```
+
+**Action**: Write the analysis script, run it, and interpret results:
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/frida-run.sh \
+  -p <package> -l /tmp/analysis.js -t 60 --output-dir ./frida-output/
+```
+
+If bypass hooks are needed alongside analysis hooks, combine them in a single script — bypass hooks first, then analysis hooks.
+
+#### Step 7.5: Iterate and Document
+
+After each Frida run, document:
+- What protection was found and how it was bypassed
+- What runtime behavior was observed that static analysis couldn't show
+- Any new endpoints, keys, or tokens discovered at runtime
+
+Feed runtime findings back into the API documentation from Phase 5 — runtime analysis often reveals:
+- Dynamically constructed URLs that don't appear in static code
+- Encryption keys loaded from server responses
+- Token refresh flows that are only triggered under specific conditions
+- Feature flags that change API behavior
+
+### Phase 8: Security Analysis
+
+(Previously Phase 6 — the security scan from `find-api-calls.sh --security` remains the same, but now also incorporates findings from Phase 7's dynamic analysis.)
 
 Scan for security-relevant patterns in the decompiled code.
 
@@ -217,10 +443,7 @@ Look for and flag:
 - **Debug flags left on** — `BuildConfig.DEBUG` checks, staging URLs, verbose logging
 - **Weak crypto** — MD5 hashing, ECB mode encryption, hardcoded IVs/salts
 - **Network Security Config** — check `res/xml/network_security_config.xml` for `cleartextTrafficPermitted="true"` or overly broad trust anchors
-
-See `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/api-extraction-patterns.md` for the full list of security patterns.
-
-## Output
+- **RASP/Anti-tamper** (from Phase 7) — document what protections were found, how robust they are, and what was needed to bypass them
 
 At the end of the workflow, deliver:
 
@@ -229,6 +452,10 @@ At the end of the workflow, deliver:
 3. **API documentation** — all discovered endpoints in the format above
 4. **Call flow map** — key paths from UI to network (especially authentication and main features)
 5. **Security findings** — certificate pinning status, exposed secrets, debug flags, crypto issues
+6. **Dynamic analysis results** (if Phase 7 was performed):
+   - Protection mechanisms found and bypass scripts generated
+   - Runtime-only discoveries (dynamic URLs, keys, tokens, feature flags)
+   - Frida scripts used (saved in the output directory for reproducibility)
 
 Use `--report report.md` on find-api-calls.sh to generate a structured Markdown report automatically.
 
@@ -239,3 +466,4 @@ Use `--report report.md` on find-api-calls.sh to generate a structured Markdown 
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/fernflower-usage.md` — Fernflower/Vineflower CLI options, when to use, APK workflow
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/api-extraction-patterns.md` — Library-specific search patterns and documentation template
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/call-flow-analysis.md` — Techniques for tracing call flows in decompiled code
+- `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/setup-guide.md` — Frida setup section covers Python venv, frida-server, and version matching

@@ -23,6 +23,7 @@ Available dependencies:
   bundletool   AAB to APK converter (for App Bundles)
   apktool      Android resource decoder
   adb          Android Debug Bridge
+  frida        Frida tools (creates venv, detects device server, matches versions)
 
 The script detects your OS and package manager, then:
   - Installs directly if possible (brew, or user-local install)
@@ -492,6 +493,21 @@ install_adb() {
 # Dispatch
 # =====================================================================
 
+install_frida() {
+  # Frida setup is handled by the dedicated setup-frida.sh script
+  # which handles: venv creation, version matching, device detection
+  local setup_script
+  setup_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/setup-frida.sh"
+
+  if [[ ! -f "$setup_script" ]]; then
+    fail "setup-frida.sh not found at $setup_script"
+    exit 1
+  fi
+
+  info "Delegating to setup-frida.sh (handles venv, version matching, device detection)..."
+  bash "$setup_script" "$@"
+}
+
 case "$DEP" in
   java)        install_java ;;
   jadx)        install_jadx ;;
@@ -500,9 +516,10 @@ case "$DEP" in
   bundletool)  install_bundletool ;;
   apktool)     install_apktool ;;
   adb)         install_adb ;;
+  frida)       install_frida ;;
   *)
     echo "Error: Unknown dependency '$DEP'" >&2
-    echo "Available: java, jadx, vineflower, dex2jar, bundletool, apktool, adb" >&2
+    echo "Available: java, jadx, vineflower, dex2jar, bundletool, apktool, adb, frida" >&2
     exit 1
     ;;
 esac
