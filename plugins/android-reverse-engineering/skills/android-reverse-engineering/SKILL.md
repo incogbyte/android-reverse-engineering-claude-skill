@@ -1,5 +1,5 @@
 ---
-description: Decompile Android APK, XAPK, AAB, DEX, JAR, and AAR files using jadx or Fernflower/Vineflower. Reverse engineer Android apps, extract HTTP API endpoints (Retrofit, OkHttp, Volley, GraphQL, WebSocket), trace call flows from UI to network layer, analyze security patterns (cert pinning, exposed secrets), and perform dynamic analysis with Frida (adaptive bypass generation, crash analysis, runtime hooking). Use when the user wants to decompile, analyze, or reverse engineer Android packages, find API endpoints, follow call flows, audit app security, or bypass runtime protections.
+description: Decompile Android APK, XAPK, AAB, DEX, JAR, and AAR files using jadx or Fernflower/Vineflower. Reverse engineer Android apps, extract HTTP API endpoints (Retrofit, OkHttp, Volley, GraphQL, WebSocket), trace call flows from UI to network layer, analyze security patterns (cert pinning, exposed secrets), perform dynamic analysis with Frida (adaptive bypass generation, crash analysis, runtime hooking), and — only when the decompiled app contains Google API keys or Firebase configuration — run a conditional Firebase & Google API testing phase (Auth, Realtime DB, Firestore, Remote Config, Storage, Dynamic Links, FCM, Gemini, Maps). Use when the user wants to decompile, analyze, or reverse engineer Android packages, find API endpoints, follow call flows, audit app security, bypass runtime protections, or test exposed Google/Firebase credentials.
 ---
 
 # Android Reverse Engineering
@@ -445,6 +445,67 @@ Look for and flag:
 - **Network Security Config** — check `res/xml/network_security_config.xml` for `cleartextTrafficPermitted="true"` or overly broad trust anchors
 - **RASP/Anti-tamper** (from Phase 7) — document what protections were found, how robust they are, and what was needed to bypass them
 
+### Phase 9: Firebase & Google API Testing (Conditional)
+
+**Only run this phase if the decompiled app contains Google API keys or Firebase configuration.** If none are present, skip it entirely — do not invent keys, do not hit Google endpoints speculatively.
+
+This phase is strictly for apps the user is authorized to test (their own apps, signed engagements, or bug-bounty programs that explicitly permit it). Confirm authorization before running write/create probes (Realtime DB `PUT`, Dynamic Links creation, FCM send) or billable probes (Maps, Vision, Translate, etc.).
+
+#### Step 9.1: Detect Firebase/Google configuration (gatekeeper)
+
+**Action**: Run the detection script against the decompiled output. Its exit code drives the rest of the phase.
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/find-firebase-config.sh \
+  <output>/ --env /tmp/fb-env.sh --json /tmp/fb-env.json
+```
+
+The script scans `res/values/strings.xml`, `AndroidManifest.xml`, `assets/google-services.json`, `assets/appsettings.json`, and the full decompiled tree for values matching `AIza[0-9A-Za-z_\-]{35}` and known Firebase keys (`google_api_key`, `project_id`, `firebase_database_url`, `gcm_defaultSenderId`, `google_app_id`, `google_storage_bucket`, `default_web_client_id`).
+
+Read the machine-readable output:
+- `FIREBASE_FOUND=true` or `GOOGLE_API_KEY_FOUND=true` (exit 0) → proceed to Step 9.2.
+- Both `false` (exit 2) → **skip the rest of Phase 9 entirely** and move on to the final deliverables.
+
+The `--env` file produced on success is ready to `source` before running any Firebase/Google request (`API_KEY`, `PROJECT_ID`, `DB_URL`, `APP_ID`, `GCM_SENDER_ID`, `PACKAGE`, `OAUTH_CLIENT_ID`, `STORAGE_BUCKET`, plus an `API_KEYS` array for apps that ship multiple keys).
+
+#### Step 9.2: Confirm authorization
+
+Before running any probe, confirm with the user that the app is in scope for Firebase/Google API testing. If the user has not authorized this, stop and report the configuration findings only. Do not proceed to Step 9.3.
+
+#### Step 9.3: Run the test matrix
+
+**Action**: Run the automated matrix against the extracted configuration.
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/test-firebase-google.sh \
+  --env /tmp/fb-env.sh --report <output>/firebase-google-report.md
+```
+
+Useful flags:
+- `--skip-billable` — skip Section 9 (Maps/AI/YouTube) to avoid billable calls on the target project.
+- `--skip-writes` — skip Realtime DB `PUT`, Dynamic Links creation, and FCM `send` (use when authorization covers reads only).
+- `--only auth,rtdb,firestore` — restrict to specific sections (`auth`, `rtdb`, `firestore`, `remoteconfig`, `storage`, `dynamiclinks`, `fcm`, `gemini`, `billable`).
+- `--api-key <KEY>` — override the key (useful when iterating through multiple keys from `API_KEYS`).
+
+The script runs the full playbook in `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/firebase-google-api-testing.md` — Firebase Auth (signup, signin, OIDC providers, phone, OOB codes, enumeration), Realtime DB (unauth and authenticated reads, rules, write test), Firestore (list root, common collections, authenticated Bearer), Remote Config (`firebase:fetch`), Cloud Storage (both bucket conventions), Dynamic Links (open redirect / phishing check), FCM legacy send, Gemini (`/files`, `/models`, `/cachedContents`, `gemini-pro:generateContent` — TruffleSecurity vector), and billable Maps/AI/YouTube/Cloud Functions probes.
+
+Each probe is classified as `VULNERABLE`, `SAFE`, `BLOCKED`, `NOT_FOUND`, `OK`, `ERROR-200`, `INFO`, or `NETWORK_ERROR`. When Firebase Auth returns an `idToken` (anonymous or email signup open), the script captures it and reuses it as `$JWT` for the authenticated Realtime DB / Firestore / lookup probes in the same run.
+
+Read the final machine-readable output:
+- `PROBE_COUNT=<n>` — how many endpoints were exercised.
+- `VULN_COUNT=<n>` — how many returned exploitable data.
+- `REPORT_FILE=<path>` — Markdown report with per-probe status, verdict, and response excerpt.
+
+#### Step 9.4: Iterate across multiple keys
+
+If `find-firebase-config.sh` reported `API_KEY_COUNT > 1`, re-run `test-firebase-google.sh` with each additional key (`source /tmp/fb-env.sh && test-firebase-google.sh --api-key "${API_KEYS[1]}" --report <output>/firebase-google-report-key2.md`). Different keys often belong to different GCP projects with different APIs enabled — a key that looks safe on project A may be wide open on project B.
+
+#### Interpreting results
+
+See `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/firebase-google-api-testing.md` for the full response-interpretation table (`SERVICE_DISABLED`, `PERMISSION_DENIED`, `ADMIN_ONLY_OPERATION`, `OPERATION_NOT_ALLOWED`, `NO_TEMPLATE`, etc.) and for the raw curl commands to re-run any single probe manually.
+
+---
+
 At the end of the workflow, deliver:
 
 1. **Decompiled source** in the output directory
@@ -456,6 +517,11 @@ At the end of the workflow, deliver:
    - Protection mechanisms found and bypass scripts generated
    - Runtime-only discoveries (dynamic URLs, keys, tokens, feature flags)
    - Frida scripts used (saved in the output directory for reproducibility)
+7. **Firebase & Google API findings** (if Phase 9 was performed):
+   - Extracted configuration values (`find-firebase-config.sh` output / env file)
+   - Per-probe verdicts from `test-firebase-google.sh` (the Markdown report)
+   - Highlighted `VULNERABLE` findings with the response excerpt and impact
+   - Any additional keys tested and their separate reports
 
 Use `--report report.md` on find-api-calls.sh to generate a structured Markdown report automatically.
 
@@ -466,4 +532,5 @@ Use `--report report.md` on find-api-calls.sh to generate a structured Markdown 
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/fernflower-usage.md` — Fernflower/Vineflower CLI options, when to use, APK workflow
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/api-extraction-patterns.md` — Library-specific search patterns and documentation template
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/call-flow-analysis.md` — Techniques for tracing call flows in decompiled code
+- `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/firebase-google-api-testing.md` — Phase 9 playbook: Firebase Auth, Realtime DB, Firestore, Remote Config, Storage, Dynamic Links, FCM, Gemini, billable Maps/AI probes
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/setup-guide.md` — Frida setup section covers Python venv, frida-server, and version matching
