@@ -173,21 +173,21 @@ export BUNDLETOOL_JAR_PATH="$HOME/bundletool/bundletool.jar"
 In Claude Code, add the marketplace and install:
 
 ```
-/plugin marketplace add incogbyte/android-reverse-engineering-skill
-/plugin install android-reverse-engineering@android-reverse-engineering-skill
+/plugin marketplace add incogbyte/android-reverse-engineering-claude-skill
+/plugin install android-reverse-engineering@android-reverse-engineering-claude-skill
 ```
 
 ### Via local clone
 
 ```bash
-git clone https://github.com/incogbyte/android-reverse-engineering-skill.git
+git clone https://github.com/incogbyte/android-reverse-engineering-claude-skill.git
 ```
 
 In Claude Code, add the local marketplace and install:
 
 ```
-/plugin marketplace add /path/to/android-reverse-engineering-skill
-/plugin install android-reverse-engineering@android-reverse-engineering-skill
+/plugin marketplace add /path/to/android-reverse-engineering-claude-skill
+/plugin install android-reverse-engineering@android-reverse-engineering-claude-skill
 ```
 
 ### Quick test (no installation)
@@ -195,7 +195,7 @@ In Claude Code, add the local marketplace and install:
 Load the plugin directly for the current session:
 
 ```bash
-claude --plugin-dir /path/to/android-reverse-engineering-skill/plugins/android-reverse-engineering
+claude --plugin-dir /path/to/android-reverse-engineering-claude-skill/plugins/android-reverse-engineering
 ```
 
 ## Usage
@@ -419,7 +419,7 @@ This approach handles RASP, root detection, SSL pinning, anti-tamper, and Frida 
 ## Repository structure
 
 ```
-android-reverse-engineering-skill/
+android-reverse-engineering-claude-skill/
 ├── .claude-plugin/
 │   └── marketplace.json
 ├── plugins/

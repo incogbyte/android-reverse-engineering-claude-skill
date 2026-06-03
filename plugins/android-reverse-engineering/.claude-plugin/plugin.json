@@ -5,7 +5,7 @@
   "author": {
     "name": "incogbyte"
   },
-  "repository": "https://github.com/incogbyte/android-reverse-engineering-skill",
+  "repository": "https://github.com/incogbyte/android-reverse-engineering-claude-skill",
   "license": "Apache-2.0",
   "keywords": ["android", "reverse-engineering", "apk", "jadx", "decompile", "api-extraction"],
   "skills": "./skills/",

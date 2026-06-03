@@ -1,0 +1,36 @@
+{
+  "name": "android-reverse-engineering-claude-skill",
+  "owner": {
+    "name": "incogbyte",
+    "url": "https://github.com/incogbyte"
+  },
+  "metadata": {
+    "description": "Marketplace for the Android Reverse Engineering Claude Code plugin.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "android-reverse-engineering",
+      "source": "./plugins/android-reverse-engineering",
+      "description": "Decompile Android APK/XAPK/AAB/DEX/JAR/AAR with jadx or Vineflower, extract HTTP APIs, trace call flows, audit security, and run adaptive Frida dynamic analysis.",
+      "version": "1.0.0",
+      "author": {
+        "name": "incogbyte",
+        "url": "https://github.com/incogbyte"
+      },
+      "homepage": "https://github.com/incogbyte/android-reverse-engineering-claude-skill",
+      "repository": "https://github.com/incogbyte/android-reverse-engineering-claude-skill",
+      "license": "Apache-2.0",
+      "keywords": [
+        "android",
+        "reverse-engineering",
+        "apk",
+        "jadx",
+        "decompile",
+        "api-extraction",
+        "frida",
+        "security"
+      ]
+    }
+  ]
+}
