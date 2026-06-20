@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.legacy.app">
-    <uses-sdk android:minSdkVersion="14" android:targetSdkVersion="18" />
-    <application>
-        <activity android:name="com.legacy.app.OldSettings" android:exported="true" />
-    </application>
-</manifest>
