@@ -10,9 +10,10 @@ Claude Code skill that automates Android application reverse engineering. Decomp
 - **Extracts HTTP APIs**: Retrofit endpoints, OkHttp calls, Volley, GraphQL queries/mutations, WebSocket connections, hardcoded URLs, authentication headers
 - **Traces call flows** from Activities/Fragments to network calls, through ViewModels, Repositories, coroutines/Flow, and RxJava chains
 - **Analyzes app structure**: AndroidManifest, packages, architectural pattern (MVP, MVVM, Clean Architecture)
-- **Audits security**: certificate pinning, disabled SSL verification, exposed secrets, debug flags, weak crypto
+- **Audits security**: certificate pinning, disabled SSL verification, exposed secrets, debug flags, weak crypto, and Android Fragment Injection (exported `PreferenceActivity` with missing/permissive `isValidFragment`)
 - **Dynamic analysis with Frida**: adaptive bypass loop that generates custom scripts based on decompiled code, runs them, captures crash logs, and iterates until protections are bypassed
 - **Bypasses runtime protections**: RASP, root detection (RootBeer, SafetyNet), SSL pinning, anti-tamper, Frida detection — all via targeted hooks generated from static analysis, not generic scripts
+- **Detects Fragment Injection**: flags exported `PreferenceActivity` subclasses with missing or permissive `isValidFragment()` overrides, plus dynamic fragment instantiation driven by Intent extras, and provides an adb + Frida confirmation playbook
 - **Handles obfuscated code**: strategies for navigating ProGuard/R8 output, using strings and annotations as anchors
 - **Generates reports**: structured Markdown reports with all findings
 
@@ -283,6 +284,9 @@ bash scripts/find-api-calls.sh output/sources/ --websocket
 # Security audit (cert pinning, exposed secrets, debug flags, crypto)
 bash scripts/find-api-calls.sh output/sources/ --security
 
+# Fragment Injection scan (exported PreferenceActivity, isValidFragment status)
+bash scripts/find-fragment-injection.sh output/ --report fragment-injection-report.md
+
 # Full analysis with Markdown report, context, and deduplication
 bash scripts/find-api-calls.sh output/sources/ --context 3 --dedup --report report.md
 
@@ -434,17 +438,41 @@ android-reverse-engineering-claude-skill/
 │       │       │   ├── jadx-usage.md
 │       │       │   ├── fernflower-usage.md
 │       │       │   ├── api-extraction-patterns.md
-│       │       │   └── call-flow-analysis.md
+│       │       │   ├── call-flow-analysis.md
+│       │       │   ├── firebase-google-api-testing.md
+│       │       │   └── android-fragment-injection.md
 │       │       └── scripts/
 │       │           ├── check-deps.sh
 │       │           ├── install-dep.sh
 │       │           ├── decompile.sh
 │       │           ├── find-api-calls.sh
+│       │           ├── find-firebase-config.sh
+│       │           ├── find-fragment-injection.sh
+│       │           ├── test-firebase-google.sh
 │       │           ├── setup-frida.sh
 │       │           ├── frida-run.sh
 │       │           └── adb-crash-capture.sh
+│       ├── tests/
+│       │   ├── run_tests.sh
+│       │   └── fixtures/        # synthetic decompiled apps
 │       └── commands/
 │           └── decompile.md
 ├── LICENSE
 └── README.md
 ```
+
+## Tests
+
+The detection scripts use bash heuristics that are easy to silently break
+(manifest parsing, `isValidFragment` classification, `targetSdkVersion` gating,
+AndroidX dynamic-load correlation). A committed fixture suite guards them:
+
+```bash
+bash plugins/android-reverse-engineering/tests/run_tests.sh
+```
+
+Fixtures under `tests/fixtures/` are synthetic decompiled apps covering:
+vulnerable / legacy (`targetSdk < 19`) / broken (`missing` + `targetSdk ≥ 19`)
+/ safe (whitelist) / AndroidX (modern preference API + dynamic load) / clean /
+minified single-line manifest, plus Firebase config present and minified, and a
+no-Firebase control. Add a fixture + assertion whenever you touch a detector.

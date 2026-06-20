@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="google_api_key">AIzaSyA0123456789abcdefghijklmnopqrstuv</string>
+    <string name="project_id">audit-project</string>
+    <string name="firebase_database_url">https://audit-project.firebaseio.com</string>
+    <string name="google_app_id">1:123456789012:android:abcdef1234567890</string>
+</resources>

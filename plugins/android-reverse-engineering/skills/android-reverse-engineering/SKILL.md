@@ -1,5 +1,5 @@
 ---
-description: Decompile Android APK, XAPK, AAB, DEX, JAR, and AAR files using jadx or Fernflower/Vineflower. Reverse engineer Android apps, extract HTTP API endpoints (Retrofit, OkHttp, Volley, GraphQL, WebSocket), trace call flows from UI to network layer, analyze security patterns (cert pinning, exposed secrets), perform dynamic analysis with Frida (adaptive bypass generation, crash analysis, runtime hooking), and — only when the decompiled app contains Google API keys or Firebase configuration — run a conditional Firebase & Google API testing phase (Auth, Realtime DB, Firestore, Remote Config, Storage, Dynamic Links, FCM, Gemini, Maps). Use when the user wants to decompile, analyze, or reverse engineer Android packages, find API endpoints, follow call flows, audit app security, bypass runtime protections, or test exposed Google/Firebase credentials.
+description: Decompile Android APK, XAPK, AAB, DEX, JAR, and AAR files using jadx or Fernflower/Vineflower. Reverse engineer Android apps, extract HTTP API endpoints (Retrofit, OkHttp, Volley, GraphQL, WebSocket), trace call flows from UI to network layer, analyze security patterns (cert pinning, exposed secrets, Android Fragment Injection via exported PreferenceActivity), perform dynamic analysis with Frida (adaptive bypass generation, crash analysis, runtime hooking), and — only when the decompiled app contains Google API keys or Firebase configuration — run a conditional Firebase & Google API testing phase (Auth, Realtime DB, Firestore, Remote Config, Storage, Dynamic Links, FCM, Gemini, Maps). Use when the user wants to decompile, analyze, or reverse engineer Android packages, find API endpoints, follow call flows, audit app security, bypass runtime protections, test exposed Google/Firebase credentials, or check for Fragment Injection exposure.
 ---
 
 # Android Reverse Engineering
@@ -200,6 +200,25 @@ Then, for each discovered endpoint, read the surrounding source code to extract:
 ```
 
 See `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/api-extraction-patterns.md` for library-specific search patterns and the full documentation template.
+
+### Phase 6: Security Patterns Scan
+
+Run the automated security sweep over the decompiled source to surface security-relevant patterns. This is the static baseline that Phase 8 (Security Analysis & Vulnerability Audit) later synthesizes together with the runtime findings from Phase 7.
+
+**Action**: Run the security-focused search:
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/find-api-calls.sh <output>/sources/ --security --context 3
+```
+
+Look for and flag:
+- **Disabled certificate pinning** — custom `TrustManager` that trusts all certs, `ALLOW_ALL_HOSTNAME_VERIFIER`
+- **Exposed secrets** — hardcoded passwords, API keys, encryption keys in source code
+- **Debug flags left on** — `BuildConfig.DEBUG` checks, staging URLs, verbose logging
+- **Weak crypto** — MD5 hashing, ECB mode encryption, hardcoded IVs/salts
+- **Network Security Config** — check `res/xml/network_security_config.xml` for `cleartextTrafficPermitted="true"` or overly broad trust anchors
+
+These raw findings feed Phase 8. Targeted vulnerability hunting (e.g. Fragment Injection) and the RASP/anti-tamper synthesis from Phase 7's dynamic analysis happen in Phase 8.
 
 ### Phase 7: Dynamic Analysis with Frida (Adaptive Loop)
 
@@ -425,25 +444,38 @@ Feed runtime findings back into the API documentation from Phase 5 — runtime a
 - Token refresh flows that are only triggered under specific conditions
 - Feature flags that change API behavior
 
-### Phase 8: Security Analysis
+### Phase 8: Security Analysis & Vulnerability Audit
 
-(Previously Phase 6 — the security scan from `find-api-calls.sh --security` remains the same, but now also incorporates findings from Phase 7's dynamic analysis.)
+Synthesize the automated sweep from Phase 6 with the runtime findings from Phase 7, then run targeted vulnerability detectors for issues the generic sweep does not catch.
 
-Scan for security-relevant patterns in the decompiled code.
+**Carry forward from Phase 6**: review every flag the `find-api-calls.sh --security` sweep produced (disabled certificate pinning, exposed secrets, debug flags, weak crypto, Network Security Config) and confirm each by reading the surrounding decompiled code — raw grep hits are leads, not findings, until you read the code.
 
-**Action**: Run the security-focused search:
+**Carry forward from Phase 7**:
+- **RASP/Anti-tamper** — document what protections were found, how robust they are, and what was needed to bypass them
+
+**Targeted vulnerability hunting**: run the issue-specific detectors that the generic sweep does not cover. Each has its own playbook in `references/`.
+
+#### Fragment Injection (exported PreferenceActivity)
+
+Android `PreferenceActivity` honours an Intent extra (`:android:show_fragment`) that selects which Fragment class to instantiate. An exported (or launchable) activity that does this without a restrictive `isValidFragment()` override lets an attacker instantiate arbitrary internal fragments inside the victim's process/UID — bypassing UI gating and access controls.
+
+**Action**: Run the detector against the decompiled output.
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/find-api-calls.sh <output>/sources/ --security --context 3
+bash ${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/scripts/find-fragment-injection.sh \
+  <output>/ --report <output>/fragment-injection-report.md --json <output>/fragment-injection.json
 ```
 
-Look for and flag:
-- **Disabled certificate pinning** — custom `TrustManager` that trusts all certs, `ALLOW_ALL_HOSTNAME_VERIFIER`
-- **Exposed secrets** — hardcoded passwords, API keys, encryption keys in source code
-- **Debug flags left on** — `BuildConfig.DEBUG` checks, staging URLs, verbose logging
-- **Weak crypto** — MD5 hashing, ECB mode encryption, hardcoded IVs/salts
-- **Network Security Config** — check `res/xml/network_security_config.xml` for `cleartextTrafficPermitted="true"` or overly broad trust anchors
-- **RASP/Anti-tamper** (from Phase 7) — document what protections were found, how robust they are, and what was needed to bypass them
+Read the machine-readable output:
+- `TARGET_SDK_VERSION=<n>` — drives the `isValidFragment` gate (see below).
+- `FRAG_INJECTION_CANDIDATE=<class>` — an exported/launchable `PreferenceActivity` that is injectable: `always_true` override, OR `missing` override with `targetSdk < 19` (or unknown). Exit 0 if any candidate exists, exit 2 if none.
+- `FRAG_INJECTION_BROKEN=<class>` — `missing` override with `targetSdk ≥ 19`: the app crashes on injection instead of being exploited. Broken, not vulnerable — report as a robustness issue.
+- `IS_VALID_FRAGMENT=<class>:<status>` — `missing`, `always_true`, or `whitelist` (only `whitelist` is safe).
+- `SHOW_FRAGMENT_READER` / `DYNAMIC_FRAGMENT_LOAD` — code that reads the extra or does `Fragment.instantiate`/`FragmentFactory`/`Class.forName` from Intent extras. `DYNAMIC_FRAGMENT_LOAD` is the relevant surface for modern AndroidX apps (which don't use `PreferenceActivity`); `ANDROIDX_PREFERENCE` flags when the modern preference API is in use.
+
+For each candidate, confirm dynamically: launch the activity via adb with the `:android:show_fragment` extra set to an internal fragment, and observe logcat/Frida for the fragment instantiating (lifecycle logs or a fragment-stack crash). Use `--pause` Frida spawn gating to hook the **candidate subclass's** `isValidFragment`/`Fragment.instantiate` before `onCreate`.
+
+See `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/android-fragment-injection.md` for the full detection-→-exploitation-→-classification playbook, adb and Frida commands, and remediation guidance.
 
 ### Phase 9: Firebase & Google API Testing (Conditional)
 
@@ -512,7 +544,7 @@ At the end of the workflow, deliver:
 2. **Architecture summary** — app structure, main packages, pattern used
 3. **API documentation** — all discovered endpoints in the format above
 4. **Call flow map** — key paths from UI to network (especially authentication and main features)
-5. **Security findings** — certificate pinning status, exposed secrets, debug flags, crypto issues
+5. **Security findings** — certificate pinning status, exposed secrets, debug flags, crypto issues, Fragment Injection exposure (candidates, `isValidFragment` status, adb/Frida confirmation)
 6. **Dynamic analysis results** (if Phase 7 was performed):
    - Protection mechanisms found and bypass scripts generated
    - Runtime-only discoveries (dynamic URLs, keys, tokens, feature flags)
@@ -533,4 +565,5 @@ Use `--report report.md` on find-api-calls.sh to generate a structured Markdown 
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/api-extraction-patterns.md` — Library-specific search patterns and documentation template
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/call-flow-analysis.md` — Techniques for tracing call flows in decompiled code
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/firebase-google-api-testing.md` — Phase 9 playbook: Firebase Auth, Realtime DB, Firestore, Remote Config, Storage, Dynamic Links, FCM, Gemini, billable Maps/AI probes
+- `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/android-fragment-injection.md` — Phase 8 playbook: detecting and exploiting Fragment Injection via exported PreferenceActivity, adb/Frida confirmation, result classification, remediation
 - `${CLAUDE_PLUGIN_ROOT}/skills/android-reverse-engineering/references/setup-guide.md` — Frida setup section covers Python venv, frida-server, and version matching
